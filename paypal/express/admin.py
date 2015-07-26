@@ -24,3 +24,4 @@ class ExpressTransactionAdmin(admin.ModelAdmin):
 
 
 admin.site.register(models.ExpressTransaction, ExpressTransactionAdmin)
+admin.site.register(models.RecurringProfile)

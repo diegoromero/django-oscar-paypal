@@ -10,7 +10,8 @@ from django.core.exceptions import ImproperlyConfigured
 from paypal.express.models import ExpressTransaction as Transaction
 from paypal.express.gateway import (
     set_txn, get_txn, do_txn, SALE, AUTHORIZATION, ORDER,
-    do_capture, DO_EXPRESS_CHECKOUT, do_void, refund_txn
+    do_capture, DO_EXPRESS_CHECKOUT, do_void, refund_txn,
+    do_recurring_payment
 )
 
 
@@ -125,3 +126,10 @@ def void_authorization(token, note=None):
     txn = Transaction.objects.get(token=token,
                                   method=DO_EXPRESS_CHECKOUT)
     return do_void(txn.value('PAYMENTINFO_0_TRANSACTIONID'), note=note)
+
+def create_recurring_payment(payer_id, token, amount, currency, start_date,
+                            description, billing_period,
+                            billing_frequency, total_periods):
+    return do_recurring_payment(payer_id, token, amount, currency, start_date,
+                                description, billing_period,
+                                billing_frequency, total_periods)

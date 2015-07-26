@@ -2,6 +2,7 @@ from __future__ import unicode_literals
 import re
 
 from django.db import models
+from django.utils.translation import ugettext_lazy as _
 from django.utils.encoding import python_2_unicode_compatible
 
 from paypal import base
@@ -45,3 +46,14 @@ class ExpressTransaction(base.ResponseModel):
         return 'method: %s: token: %s' % (
             self.method, self.token)
 
+class RecurringProfile(models.Model):
+ 
+    profile_id = models.CharField(_("Profile Id"), max_length=64, unique=True)
+    profile_status = models.CharField(_("Profile Status"), max_length=64,
+                                   null=True, blank=True)
+    order_number = models.CharField(_("Order number"), max_length=128)
+    date_created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'paypal'
+        ordering = ('-date_created',)

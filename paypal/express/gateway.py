@@ -13,6 +13,7 @@ from localflavor.us import us_states
 from . import models, exceptions as express_exceptions
 from paypal import gateway
 from paypal import exceptions
+from paypal.utils import get_recurring_profile
 
 
 # PayPal methods
@@ -22,6 +23,7 @@ DO_EXPRESS_CHECKOUT = 'DoExpressCheckoutPayment'
 DO_CAPTURE = 'DoCapture'
 DO_VOID = 'DoVoid'
 REFUND_TRANSACTION = 'RefundTransaction'
+CREATE_RECURRING_PAYMENT_PROFILE = 'CreateRecurringPaymentsProfile'
 
 SALE, AUTHORIZATION, ORDER = 'Sale', 'Authorization', 'Order'
 
@@ -97,6 +99,10 @@ def _fetch_response(method, extra_params):
             txn.token = params['TOKEN']
             txn.amount = D(pairs['PAYMENTINFO_0_AMT'])
             txn.currency = pairs['PAYMENTINFO_0_CURRENCYCODE']
+        elif method == CREATE_RECURRING_PAYMENT_PROFILE:
+            txn.token = params['TOKEN']
+            txn.amount = D(params['AMT'])
+            txn.currency = params['CURRENCYCODE']
     else:
         # There can be more than one error, each with its own number.
         if 'L_ERRORCODE0' in pairs:
@@ -192,159 +198,177 @@ def set_txn(basket, shipping_methods, currency, return_url, cancel_url, update_u
 
     # Add item details
     index = 0
+    is_recurring = False
     for index, line in enumerate(basket.all_lines()):
+    
+    
         product = line.product
-        params['L_PAYMENTREQUEST_0_NAME%d' % index] = product.get_title()
-        params['L_PAYMENTREQUEST_0_NUMBER%d' % index] = (product.upc if
-                                                         product.upc else '')
-        desc = ''
-        if product.description:
-            desc = _format_description(product.description)
-        params['L_PAYMENTREQUEST_0_DESC%d' % index] = desc
-        # Note, we don't include discounts here - they are handled as separate
-        # lines - see below
-        params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
-            line.unit_price_incl_tax)
-        params['L_PAYMENTREQUEST_0_QTY%d' % index] = line.quantity
+        recurring_profile = get_recurring_profile(product)
+        if recurring_profile is not None:
+            is_recurring = True
+            
+            if is_recurring and basket.num_items > 1:
+                raise exceptions.PayPalError('Only a single recurring payment is supported')
+                
+            params['L_BILLINGTYPE0'] = 'RecurringPayments'
+            params['L_BILLINGAGREEMENTDESCRIPTION0'] = recurring_profile.get(
+                'billing_description'
+            )
+            
+        else:
+            
+            params['L_PAYMENTREQUEST_0_NAME%d' % index] = product.get_title()
+            params['L_PAYMENTREQUEST_0_NUMBER%d' % index] = (product.upc if
+                                                            product.upc else '')
+            desc = ''
+            if product.description:
+                desc = _format_description(product.description)
+            params['L_PAYMENTREQUEST_0_DESC%d' % index] = desc
+            # Note, we don't include discounts here - they are handled as separate
+            # lines - see below
+            params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
+                line.unit_price_incl_tax)
+            params['L_PAYMENTREQUEST_0_QTY%d' % index] = line.quantity
 
-    # If the order has discounts associated with it, the way PayPal suggests
-    # using the API is to add a separate item for the discount with the value
-    # as a negative price.  See "Integrating Order Details into the Express
-    # Checkout Flow"
-    # https://cms.paypal.com/us/cgi-bin/?cmd=_render-content&content_ID=developer/e_howto_api_ECCustomizing
+    if not is_recurring:
+        # If the order has discounts associated with it, the way PayPal suggests
+        # using the API is to add a separate item for the discount with the value
+        # as a negative price.  See "Integrating Order Details into the Express
+        # Checkout Flow"
+        # https://cms.paypal.com/us/cgi-bin/?cmd=_render-content&content_ID=developer/e_howto_api_ECCustomizing
 
-    # Iterate over the 3 types of discount that can occur
-    for discount in basket.offer_discounts:
-        index += 1
-        name = _("Special Offer: %s") % discount['name']
-        params['L_PAYMENTREQUEST_0_NAME%d' % index] = name
-        params['L_PAYMENTREQUEST_0_DESC%d' % index] = _format_description(name)
-        params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
-            -discount['discount'])
-        params['L_PAYMENTREQUEST_0_QTY%d' % index] = 1
-    for discount in basket.voucher_discounts:
-        index += 1
-        name = "%s (%s)" % (discount['voucher'].name,
-                            discount['voucher'].code)
-        params['L_PAYMENTREQUEST_0_NAME%d' % index] = name
-        params['L_PAYMENTREQUEST_0_DESC%d' % index] = _format_description(name)
-        params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
-            -discount['discount'])
-        params['L_PAYMENTREQUEST_0_QTY%d' % index] = 1
-    for discount in basket.shipping_discounts:
-        index += 1
-        name = _("Shipping Offer: %s") % discount['name']
-        params['L_PAYMENTREQUEST_0_NAME%d' % index] = name
-        params['L_PAYMENTREQUEST_0_DESC%d' % index] = _format_description(name)
-        params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
-            -discount['discount'])
-        params['L_PAYMENTREQUEST_0_QTY%d' % index] = 1
+        # Iterate over the 3 types of discount that can occur
+        for discount in basket.offer_discounts:
+            index += 1
+            name = _("Special Offer: %s") % discount['name']
+            params['L_PAYMENTREQUEST_0_NAME%d' % index] = name
+            params['L_PAYMENTREQUEST_0_DESC%d' % index] = _format_description(name)
+            params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
+                -discount['discount'])
+            params['L_PAYMENTREQUEST_0_QTY%d' % index] = 1
+        for discount in basket.voucher_discounts:
+            index += 1
+            name = "%s (%s)" % (discount['voucher'].name,
+                                discount['voucher'].code)
+            params['L_PAYMENTREQUEST_0_NAME%d' % index] = name
+            params['L_PAYMENTREQUEST_0_DESC%d' % index] = _format_description(name)
+            params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
+                -discount['discount'])
+            params['L_PAYMENTREQUEST_0_QTY%d' % index] = 1
+        for discount in basket.shipping_discounts:
+            index += 1
+            name = _("Shipping Offer: %s") % discount['name']
+            params['L_PAYMENTREQUEST_0_NAME%d' % index] = name
+            params['L_PAYMENTREQUEST_0_DESC%d' % index] = _format_description(name)
+            params['L_PAYMENTREQUEST_0_AMT%d' % index] = _format_currency(
+                -discount['discount'])
+            params['L_PAYMENTREQUEST_0_QTY%d' % index] = 1
 
-    # We include tax in the prices rather than separately as that's how it's
-    # done on most British/Australian sites.  Will need to refactor in the
-    # future no doubt.
+        # We include tax in the prices rather than separately as that's how it's
+        # done on most British/Australian sites.  Will need to refactor in the
+        # future no doubt.
 
-    # Note that the following constraint must be met
-    #
-    # PAYMENTREQUEST_0_AMT = (
-    #     PAYMENTREQUEST_0_ITEMAMT +
-    #     PAYMENTREQUEST_0_TAXAMT +
-    #     PAYMENTREQUEST_0_SHIPPINGAMT +
-    #     PAYMENTREQUEST_0_HANDLINGAMT)
-    #
-    # Hence, if tax is to be shown then it has to be aggregated up to the order
-    # level.
-    params['PAYMENTREQUEST_0_ITEMAMT'] = _format_currency(
-        basket.total_incl_tax)
-    params['PAYMENTREQUEST_0_TAXAMT'] = _format_currency(D('0.00'))
+        # Note that the following constraint must be met
+        #
+        # PAYMENTREQUEST_0_AMT = (
+        #     PAYMENTREQUEST_0_ITEMAMT +
+        #     PAYMENTREQUEST_0_TAXAMT +
+        #     PAYMENTREQUEST_0_SHIPPINGAMT +
+        #     PAYMENTREQUEST_0_HANDLINGAMT)
+        #
+        # Hence, if tax is to be shown then it has to be aggregated up to the order
+        # level.
+        params['PAYMENTREQUEST_0_ITEMAMT'] = _format_currency(
+            basket.total_incl_tax)
+        params['PAYMENTREQUEST_0_TAXAMT'] = _format_currency(D('0.00'))
 
     # Instant update callback information
     if update_url:
         params['CALLBACK'] = update_url
 
-    # Contact details and address details - we provide these as it would make
-    # the PayPal registration process smoother is the user doesn't already have
-    # an account.
-    if user:
-        params['EMAIL'] = user.email
-    if user_address:
-        params['SHIPTONAME'] = user_address.name
-        params['SHIPTOSTREET'] = user_address.line1
-        params['SHIPTOSTREET2'] = user_address.line2
-        params['SHIPTOCITY'] = user_address.line4
-        params['SHIPTOSTATE'] = user_address.state
-        params['SHIPTOZIP'] = user_address.postcode
-        params['SHIPTOCOUNTRYCODE'] = user_address.country.iso_3166_1_a2
+        # Contact details and address details - we provide these as it would make
+        # the PayPal registration process smoother is the user doesn't already have
+        # an account.
+        if user:
+            params['EMAIL'] = user.email
+        if user_address:
+            params['SHIPTONAME'] = user_address.name
+            params['SHIPTOSTREET'] = user_address.line1
+            params['SHIPTOSTREET2'] = user_address.line2
+            params['SHIPTOCITY'] = user_address.line4
+            params['SHIPTOSTATE'] = user_address.state
+            params['SHIPTOZIP'] = user_address.postcode
+            params['SHIPTOCOUNTRYCODE'] = user_address.country.iso_3166_1_a2
 
-    # Shipping details (if already set) - we override the SHIPTO* fields and
-    # set a flag to indicate that these can't be altered on the PayPal side.
-    if shipping_method and shipping_address:
-        params['ADDROVERRIDE'] = 1
-        # It's recommend not to set 'confirmed shipping' if supplying the
-        # shipping address directly.
-        params['REQCONFIRMSHIPPING'] = 0
-        params['SHIPTONAME'] = shipping_address.name
-        params['SHIPTOSTREET'] = shipping_address.line1
-        params['SHIPTOSTREET2'] = shipping_address.line2
-        params['SHIPTOCITY'] = shipping_address.line4
-        params['SHIPTOSTATE'] = shipping_address.state
-        params['SHIPTOZIP'] = shipping_address.postcode
-        params['SHIPTOCOUNTRYCODE'] = shipping_address.country.iso_3166_1_a2
+        # Shipping details (if already set) - we override the SHIPTO* fields and
+        # set a flag to indicate that these can't be altered on the PayPal side.
+        if shipping_method and shipping_address:
+            params['ADDROVERRIDE'] = 1
+            # It's recommend not to set 'confirmed shipping' if supplying the
+            # shipping address directly.
+            params['REQCONFIRMSHIPPING'] = 0
+            params['SHIPTONAME'] = shipping_address.name
+            params['SHIPTOSTREET'] = shipping_address.line1
+            params['SHIPTOSTREET2'] = shipping_address.line2
+            params['SHIPTOCITY'] = shipping_address.line4
+            params['SHIPTOSTATE'] = shipping_address.state
+            params['SHIPTOZIP'] = shipping_address.postcode
+            params['SHIPTOCOUNTRYCODE'] = shipping_address.country.iso_3166_1_a2
 
-        # For US addresses, we need to try and convert the state into 2 letter
-        # code - otherwise we can get a 10736 error as the shipping address and
-        # zipcode don't match the state. Very silly really.
-        if params['SHIPTOCOUNTRYCODE'] == 'US':
-            key = params['SHIPTOSTATE'].lower().strip()
-            if key in us_states.STATES_NORMALIZED:
-                params['SHIPTOSTATE'] = us_states.STATES_NORMALIZED[key]
+            # For US addresses, we need to try and convert the state into 2 letter
+            # code - otherwise we can get a 10736 error as the shipping address and
+            # zipcode don't match the state. Very silly really.
+            if params['SHIPTOCOUNTRYCODE'] == 'US':
+                key = params['SHIPTOSTATE'].lower().strip()
+                if key in us_states.STATES_NORMALIZED:
+                    params['SHIPTOSTATE'] = us_states.STATES_NORMALIZED[key]
 
-    elif no_shipping:
-        params['NOSHIPPING'] = 1
+        elif no_shipping:
+            params['NOSHIPPING'] = 1
 
-    # Shipping charges
-    params['PAYMENTREQUEST_0_SHIPPINGAMT'] = _format_currency(D('0.00'))
-    max_charge = D('0.00')
-    for index, method in enumerate(shipping_methods):
-        is_default = index == 0
-        params['L_SHIPPINGOPTIONISDEFAULT%d' % index] = 'true' if is_default else 'false'
-        if hasattr(method, 'charge_incl_tax'):
-            # Oscar < 0.8
-            charge = method.charge_incl_tax
-        else:
-            cost = method.calculate(basket)
-            charge = cost.incl_tax
-        if charge > max_charge:
-            max_charge = charge
-        if is_default:
+        # Shipping charges
+        params['PAYMENTREQUEST_0_SHIPPINGAMT'] = _format_currency(D('0.00'))
+        max_charge = D('0.00')
+        for index, method in enumerate(shipping_methods):
+            is_default = index == 0
+            params['L_SHIPPINGOPTIONISDEFAULT%d' % index] = 'true' if is_default else 'false'
+            if hasattr(method, 'charge_incl_tax'):
+                # Oscar < 0.8
+                charge = method.charge_incl_tax
+            else:
+                cost = method.calculate(basket)
+                charge = cost.incl_tax
+            if charge > max_charge:
+                max_charge = charge
+            if is_default:
+                params['PAYMENTREQUEST_0_SHIPPINGAMT'] = _format_currency(charge)
+                params['PAYMENTREQUEST_0_AMT'] += charge
+            params['L_SHIPPINGOPTIONNAME%d' % index] = six.text_type(method.name)
+            params['L_SHIPPINGOPTIONAMOUNT%d' % index] = _format_currency(charge)
+
+        # Set shipping charge explicitly if it has been passed
+        if shipping_method:
+            if hasattr(shipping_method, 'charge_incl_tax'):
+                # Oscar < 0.8
+                max_charge = charge = shipping_method.charge_incl_tax
+            else:
+                cost = shipping_method.calculate(basket)
+                charge = cost.incl_tax
             params['PAYMENTREQUEST_0_SHIPPINGAMT'] = _format_currency(charge)
             params['PAYMENTREQUEST_0_AMT'] += charge
-        params['L_SHIPPINGOPTIONNAME%d' % index] = six.text_type(method.name)
-        params['L_SHIPPINGOPTIONAMOUNT%d' % index] = _format_currency(charge)
 
-    # Set shipping charge explicitly if it has been passed
-    if shipping_method:
-        if hasattr(shipping_method, 'charge_incl_tax'):
-            # Oscar < 0.8
-            max_charge = charge = shipping_method.charge_incl_tax
-        else:
-            cost = shipping_method.calculate(basket)
-            charge = cost.incl_tax
-        params['PAYMENTREQUEST_0_SHIPPINGAMT'] = _format_currency(charge)
-        params['PAYMENTREQUEST_0_AMT'] += charge
+        # Both the old version (MAXAMT) and the new version (PAYMENT...) are needed
+        # here - think it's a problem with the API.
+        params['PAYMENTREQUEST_0_MAXAMT'] = _format_currency(amount + max_charge)
+        params['MAXAMT'] = _format_currency(amount + max_charge)
 
-    # Both the old version (MAXAMT) and the new version (PAYMENT...) are needed
-    # here - think it's a problem with the API.
-    params['PAYMENTREQUEST_0_MAXAMT'] = _format_currency(amount + max_charge)
-    params['MAXAMT'] = _format_currency(amount + max_charge)
+        # Handling set to zero for now - I've never worked on a site that needed a
+        # handling charge.
+        params['PAYMENTREQUEST_0_HANDLINGAMT'] = _format_currency(D('0.00'))
 
-    # Handling set to zero for now - I've never worked on a site that needed a
-    # handling charge.
-    params['PAYMENTREQUEST_0_HANDLINGAMT'] = _format_currency(D('0.00'))
-
-    # Ensure that the total is formatted correctly.
-    params['PAYMENTREQUEST_0_AMT'] = _format_currency(
-        params['PAYMENTREQUEST_0_AMT'])
+        # Ensure that the total is formatted correctly.
+        params['PAYMENTREQUEST_0_AMT'] = _format_currency(
+            params['PAYMENTREQUEST_0_AMT'])
 
     txn = _fetch_response(SET_EXPRESS_CHECKOUT, params)
 
@@ -418,3 +442,47 @@ def refund_txn(txn_id, is_partial=False, amount=None, currency=None):
         params['AMT'] = amount
         params['CURRENCYCODE'] = currency
     return _fetch_response(REFUND_TRANSACTION, params)
+
+    
+PERIOD_DAY = 'Day'
+PERIOD_WEEK = 'Week'
+PERIOD_MONTH = 'Month'
+PERIOD_SEMI_MONTH = 'SemiMonth'
+PERIOD_YEAR = 'Year'
+
+PERIODS = [
+    PERIOD_DAY,
+    PERIOD_WEEK,
+    PERIOD_MONTH,
+    PERIOD_SEMI_MONTH,
+    PERIOD_YEAR
+]
+
+AUTOBILL_YES = 'AddToNextBilling'
+AUTOBILL_NO = 'NoAutoBill'
+
+def do_recurring_payment(payer_id, token, amount, currency, start_date,
+                             description, billing_period,
+                             billing_frequency, total_periods):
+    if billing_period not in PERIODS:
+        raise ValueError("%s is not a valid billing period" % billing_period)
+        
+    params = {
+        'PAYERID': payer_id,
+        'TOKEN': token,
+        'PROFILESTARTDATE': '',
+        'PROFILESTARTDATE': start_date,
+        'CURRENCYCODE': currency,
+        'AMT': amount,
+        'DESC': description,
+        'BILLINGPERIOD': billing_period,
+        'BILLINGFREQUENCY': billing_frequency,
+        'TOTALBILLINGCYCLES' : total_periods,
+        'MAXFAILEDPAYMENTS': getattr(settings, 'PAYPAL_RECURRING_MAX_FAIL', 0)
+    }
+
+    params['AUTOBILLOUTAMT'] = AUTOBILL_NO
+    if getattr(settings, 'PAYPAL_RECURRING_AUTO_BILL', True):
+        params['AUTOBILLOUTAMT'] = AUTOBILL_YES
+
+    return _fetch_response(CREATE_RECURRING_PAYMENT_PROFILE, params)
